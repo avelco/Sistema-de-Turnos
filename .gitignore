@@ -1,0 +1,8 @@
+data/*.db
+data/*.db-shm
+data/*.db-wal
+node_modules/
+.pnpm-store/
+coverage/
+.DS_Store
+docs/qa/

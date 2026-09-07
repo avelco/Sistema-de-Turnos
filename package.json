@@ -1,0 +1,20 @@
+{
+  "name": "lab-maria-eugenia-tamayo-giraldo",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@11.9.0",
+  "type": "module",
+  "description": "Prototipo local de gestión de turnos para recepción, toma de muestras y rayos X",
+  "scripts": {
+    "dev": "node --watch src/server.mjs",
+    "start": "node src/server.mjs",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=22.5.0",
+    "pnpm": ">=11.9.0"
+  },
+  "dependencies": {
+    "fastify": "^5.12.1"
+  }
+}
