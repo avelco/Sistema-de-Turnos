@@ -5,7 +5,7 @@ import { createApplication } from '../src/server.mjs';
 const formHeaders = { 'content-type': 'application/x-www-form-urlencoded' };
 
 test('Fastify expone salud y las cuatro superficies principales', async () => {
-  const application = createApplication({ dbPath: ':memory:', seed: false });
+  const application = await createApplication({ dbPath: ':memory:', seed: false });
   try {
     const health = await application.server.inject({ method: 'GET', url: '/salud' });
     assert.equal(health.statusCode, 200);
@@ -21,11 +21,11 @@ test('Fastify expone salud y las cuatro superficies principales', async () => {
     assert.match(javascript.body, /event\.target\.id === 'display-content'/);
 
     for (const [url, expected] of [
-      ['/recepcion', 'Recepción'],
-      ['/atencion', 'Módulo 1'],
-      ['/pantalla', 'Pacientes llamados'],
-      ['/configuracion', 'Una cola, varios puestos']
-    ]) {
+    ['/recepcion', 'Recepción'],
+    ['/atencion', 'Módulo 1'],
+    ['/pantalla', 'Pacientes llamados'],
+    ['/configuracion', 'Una cola, varios puestos']])
+    {
       const response = await application.server.inject({ method: 'GET', url });
       assert.equal(response.statusCode, 200);
       assert.match(response.body, new RegExp(expected));
@@ -41,11 +41,11 @@ test('Fastify expone salud y las cuatro superficies principales', async () => {
 });
 
 test('dos módulos llaman pacientes distintos mediante las rutas HTTP', async () => {
-  const application = createApplication({ dbPath: ':memory:', seed: false });
+  const application = await createApplication({ dbPath: ':memory:', seed: false });
   try {
-    const [moduleOne, moduleTwo] = application.store.listStations('lab');
-    application.store.createVisit({ name: 'Paciente Primero', services: ['lab'] });
-    application.store.createVisit({ name: 'Paciente Segundo', services: ['lab'] });
+    const [moduleOne, moduleTwo] = await application.store.listStations('lab');
+    await application.store.createVisit({ name: 'Paciente Primero', services: ['lab'] });
+    await application.store.createVisit({ name: 'Paciente Segundo', services: ['lab'] });
 
     const first = await application.server.inject({
       method: 'POST',
@@ -64,7 +64,7 @@ test('dos módulos llaman pacientes distintos mediante las rutas HTTP', async ()
     assert.equal(second.statusCode, 200);
     assert.match(first.body, /Módulo 1/);
     assert.match(second.body, /Módulo 2/);
-    assert.notEqual(application.store.getActive('lab', moduleOne.id).id, application.store.getActive('lab', moduleTwo.id).id);
+    assert.notEqual((await application.store.getActive('lab', moduleOne.id)).id, (await application.store.getActive('lab', moduleTwo.id)).id);
 
     const display = await application.server.inject({ method: 'GET', url: '/pantalla' });
     assert.match(display.body, /Módulo 1 · Toma de muestras/);
@@ -75,7 +75,7 @@ test('dos módulos llaman pacientes distintos mediante las rutas HTTP', async ()
 });
 
 test('configuración agrega un módulo disponible inmediatamente en Atención', async () => {
-  const application = createApplication({ dbPath: ':memory:', seed: false });
+  const application = await createApplication({ dbPath: ':memory:', seed: false });
   try {
     const response = await application.server.inject({
       method: 'POST',
@@ -88,14 +88,14 @@ test('configuración agrega un módulo disponible inmediatamente en Atención', 
 
     const workspace = await application.server.inject({ method: 'GET', url: '/atencion?service=lab' });
     assert.match(workspace.body, /Módulo 3/);
-    assert.equal(application.store.listStations('lab').length, 3);
+    assert.equal((await application.store.listStations('lab')).length, 3);
   } finally {
     await application.close();
   }
 });
 
 test('el dashboard administrativo exige contraseña, crea sesión y permite cerrarla', async () => {
-  const application = createApplication({ dbPath: ':memory:', seed: false, adminPassword: 'secreta' });
+  const application = await createApplication({ dbPath: ':memory:', seed: false, adminPassword: 'secreta' });
   try {
     const loginPage = await application.server.inject({ method: 'GET', url: '/admin' });
     assert.equal(loginPage.statusCode, 200);
@@ -137,4 +137,26 @@ test('el dashboard administrativo exige contraseña, crea sesión y permite cerr
   } finally {
     await application.close();
   }
+});
+
+test('recuerda el puesto, respeta enlaces explícitos y recupera preferencias inválidas', async () => {
+  const application = await createApplication({ dbPath: ':memory:', seed: false });
+  try {
+    const [one, two] = await application.store.listStations('lab');
+    const selected = await application.server.inject({ url: `/atencion/puesto?service=lab&stationId=${two.id}` });
+    const cookie = selected.headers['set-cookie'].split(';')[0];
+    const remembered = await application.server.inject({ url: '/atencion', headers: { cookie } });
+    assert.match(remembered.body, /<strong>Módulo 2<\/strong>/);
+    assert.match(remembered.body, /name="stationId" value="2"/);
+    const explicit = await application.server.inject({ url: `/atencion?service=lab&stationId=${one.id}`, headers: { cookie } });
+    assert.match(explicit.body, /<strong>Módulo 1<\/strong>/);
+    await application.store.setStationActive(two.id, false);
+    const fallback = await application.server.inject({ url: '/atencion', headers: { cookie } });
+    assert.match(fallback.body, /<strong>Módulo 1<\/strong>/);
+    assert.doesNotMatch(fallback.body, /<span>Módulo 2<\/span>/);
+    for (const invalid of ['%7B', 'null', '%22text%22']) {
+      const response = await application.server.inject({ url: '/atencion', headers: { cookie: `turnos_station=${invalid}` } });
+      assert.equal(response.statusCode, 200);
+    }
+  } finally { await application.close(); }
 });

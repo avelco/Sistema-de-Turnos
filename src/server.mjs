@@ -36,8 +36,8 @@ function cleanService(value) {
   return value === 'xray' ? 'xray' : 'lab';
 }
 
-function selectedStation(store, service, value) {
-  const stations = store.listStations(service);
+async function selectedStation(store, service, value) {
+  const stations = await store.listStations(service);
   return stations.find((station) => station.id === Number(value)) || stations[0] || null;
 }
 
@@ -87,15 +87,18 @@ function cookiesFrom(request) {
   }).filter(([name]) => name));
 }
 
-export function createApplication({
+export async function createApplication({
   dbPath = process.env.TURNO_DB || DEFAULT_DB,
-  seed = true,
+  seed = process.env.NODE_ENV !== 'production',
   logger = false,
   adminPassword = process.env.ADMIN_PASSWORD || 'admin'
 } = {}) {
-  const server = Fastify({ logger, bodyLimit: 64 * 1024 });
-  const store = createStore(dbPath);
-  if (seed) store.seed();
+  if (process.env.NODE_ENV === 'production' && (!process.env.ADMIN_PASSWORD || adminPassword === 'admin')) {
+    throw new Error('Configura ADMIN_PASSWORD para producción.');
+  }
+  const server = Fastify({ logger, trustProxy: process.env.TRUST_PROXY === 'true' ? 1 : false, bodyLimit: 64 * 1024 });
+  const store = await createStore(dbPath);
+  if (seed) await store.seed();
   const clients = new Set();
   let eventId = 0;
   let storeClosed = false;
@@ -124,7 +127,7 @@ export function createApplication({
   }
 
   function setAdminCookie(request, reply, token, maxAge = adminSessionDuration / 1000) {
-    const secure = request.protocol === 'https' ? '; Secure' : '';
+    const secure = process.env.NODE_ENV === 'production' || request.protocol === 'https' ? '; Secure' : '';
     reply.header('Set-Cookie', `turnos_admin_session=${encodeURIComponent(token)}; Path=/admin; HttpOnly; SameSite=Strict; Max-Age=${maxAge}${secure}`);
   }
 
@@ -148,11 +151,11 @@ export function createApplication({
     }
   }
 
-  function broadcastState({ announce = false } = {}) {
-    broadcast('queue-summary', renderQueueSummary(store.queueSummary()));
-    broadcast('recent-arrivals', renderRecentArrivals(store.recentArrivals()));
+  async function broadcastState({ announce = false } = {}) {
+    broadcast('queue-summary', renderQueueSummary(await store.queueSummary()));
+    broadcast('recent-arrivals', renderRecentArrivals(await store.recentArrivals()));
     broadcast('queue-updated', 'refresh');
-    broadcast('display-update', renderDisplayContent(store));
+    broadcast('display-update', await renderDisplayContent(store));
     if (announce) broadcast('turn-announced', 'announce');
   }
 
@@ -176,20 +179,40 @@ export function createApplication({
     return reply;
   });
 
-  server.get('/salud', () => ({ status: 'ok', service: 'sistema-de-turnos' }));
-  server.get('/', (request, reply) => reply.redirect('/recepcion'));
-  server.get('/recepcion', (request, reply) => html(reply, receptionPage(store)));
-  server.get('/atencion', (request, reply) => {
-    const service = cleanService(request.query?.service);
-    const station = selectedStation(store, service, request.query?.stationId);
-    return html(reply, attentionPage(store, service, station?.id));
+  server.get('/salud', async () => {
+    await store.db.prepare('SELECT 1').get();
+    return { status: 'ok', service: 'sistema-de-turnos' };
   });
-  server.get('/pantalla', (request, reply) => html(reply, displayPage(store)));
-  server.get('/configuracion', (request, reply) => html(reply, configurationPage(store)));
-  server.get('/admin', (request, reply) => {
+  server.get('/', (request, reply) => reply.redirect('/recepcion'));
+  server.get('/recepcion', async (request, reply) => html(reply, await receptionPage(store)));
+  // This cookie is a device preference, never an authorization decision.
+  function rememberedStation(request) {
+    try {
+      const value = JSON.parse(cookiesFrom(request).turnos_station || '{}');
+      return value && typeof value === 'object' ? value : {};
+    } catch { return {}; }
+  }
+
+  function rememberStation(reply, service, station) {
+    const preference = encodeURIComponent(JSON.stringify({ service, stationId: station?.id || null }));
+    const secure = process.env.NODE_ENV === 'production' ? '; Secure' : '';
+    reply.header('Set-Cookie', `turnos_station=${preference}; Path=/atencion; Max-Age=31536000; HttpOnly; SameSite=Lax${secure}`);
+  }
+
+  server.get('/atencion', async (request, reply) => {
+    const explicit = request.query?.service !== undefined || request.query?.stationId !== undefined;
+    const selection = explicit ? request.query : rememberedStation(request);
+    const service = cleanService(selection.service);
+    const station = await selectedStation(store, service, selection.stationId);
+    rememberStation(reply, service, station);
+    return html(reply, await attentionPage(store, service, station?.id));
+  });
+  server.get('/pantalla', async (request, reply) => html(reply, await displayPage(store)));
+  server.get('/configuracion', async (request, reply) => html(reply, await configurationPage(store)));
+  server.get('/admin', async (request, reply) => {
     if (!activeAdminSession(request)) return html(reply, adminLoginPage());
     const period = ['today', '7d', '30d'].includes(request.query?.period) ? request.query.period : 'today';
-    return html(reply, adminDashboardPage(store.adminDashboard(period)));
+    return html(reply, adminDashboardPage(await store.adminDashboard(period)));
   });
 
   server.post('/admin/login', (request, reply) => {
@@ -220,15 +243,16 @@ export function createApplication({
   });
 
   server.get('/recepcion/formulario', (request, reply) => html(reply, renderRegistrationPanel()));
-  server.get('/atencion/puesto', (request, reply) => {
+  server.get('/atencion/puesto', async (request, reply) => {
     const service = cleanService(request.query?.service);
-    const station = selectedStation(store, service, request.query?.stationId);
-    return html(reply, renderAttentionWorkspace(store, service, station?.id));
+    const station = await selectedStation(store, service, request.query?.stationId);
+    rememberStation(reply, service, station);
+    return html(reply, await renderAttentionWorkspace(store, service, station?.id));
   });
-  server.get('/atencion/panel', (request, reply) => {
+  server.get('/atencion/panel', async (request, reply) => {
     const service = cleanService(request.query?.service);
-    const station = selectedStation(store, service, request.query?.stationId);
-    return html(reply, renderAttentionContent(store, service, station?.id));
+    const station = await selectedStation(store, service, request.query?.stationId);
+    return html(reply, await renderAttentionContent(store, service, station?.id));
   });
 
   server.get('/eventos', (request, reply) => {
@@ -250,7 +274,7 @@ export function createApplication({
     return reply;
   });
 
-  server.post('/turnos', (request, reply) => {
+  server.post('/turnos', async (request, reply) => {
     const values = {
       name: request.body?.name || '',
       service: request.body?.service || '',
@@ -263,9 +287,9 @@ export function createApplication({
 
     try {
       const services = values.service === 'both' ? ['lab', 'xray'] : [values.service];
-      const created = store.createVisit({ name: values.name, services, priority: values.priority === '1' });
+      const created = await store.createVisit({ name: values.name, services, priority: values.priority === '1' });
       html(reply, renderRegistrationPanel({ created }));
-      broadcastState();
+      await broadcastState();
       return reply;
     } catch (error) {
       return html(reply, renderRegistrationPanel({ values, errors: { form: error.message } }));
@@ -273,69 +297,69 @@ export function createApplication({
   });
 
   const attentionRoutes = {
-    '/atencion/llamar': ({ service, station }) => store.callNext(service, station.id),
-    '/atencion/repetir': ({ body, station }) => store.repeatCall(Number(body.entryId), station.id),
-    '/atencion/iniciar': ({ body, station }) => store.startAttention(Number(body.entryId), station.id),
-    '/atencion/finalizar': ({ body, station }) => store.completeAttention(Number(body.entryId), station.id),
-    '/atencion/ausente': ({ body, station }) => store.markAbsent(Number(body.entryId), station.id)
+    '/atencion/llamar': async ({ service, station }) => await store.callNext(service, station.id),
+    '/atencion/repetir': async ({ body, station }) => await store.repeatCall(Number(body.entryId), station.id),
+    '/atencion/iniciar': async ({ body, station }) => await store.startAttention(Number(body.entryId), station.id),
+    '/atencion/finalizar': async ({ body, station }) => await store.completeAttention(Number(body.entryId), station.id),
+    '/atencion/ausente': async ({ body, station }) => await store.markAbsent(Number(body.entryId), station.id)
   };
 
   for (const [pathname, action] of Object.entries(attentionRoutes)) {
-    server.post(pathname, (request, reply) => {
+    server.post(pathname, async (request, reply) => {
       const body = request.body || {};
       const service = cleanService(body.service);
-      const station = selectedStation(store, service, body.stationId);
+      const station = await selectedStation(store, service, body.stationId);
       try {
         if (!station) throw new Error('No hay puestos activos para este servicio.');
-        const result = action({ body, service, station });
+        const result = await action({ body, service, station });
         const announce = pathname === '/atencion/llamar' || pathname === '/atencion/repetir';
         const text = pathname === '/atencion/llamar' ? `Paciente llamado a ${station.name}.` :
-          pathname === '/atencion/repetir' ? `Llamado repetido para ${station.name}.` :
-          pathname === '/atencion/iniciar' ? `Atención iniciada en ${station.name}.` :
-          pathname === '/atencion/finalizar' && result.released ? 'Atención finalizada. El turno de Rayos X ya está disponible.' :
-          pathname === '/atencion/finalizar' ? 'Atención finalizada. Ya puedes llamar al siguiente.' :
-          result.cancelled ? 'Turno marcado como ausente. Su turno pendiente de Rayos X fue cancelado.' :
-          'Turno marcado como ausente.';
-        html(reply, renderAttentionContent(store, service, station.id, { type: 'success', text }));
-        broadcastState({ announce });
+        pathname === '/atencion/repetir' ? `Llamado repetido para ${station.name}.` :
+        pathname === '/atencion/iniciar' ? `Atención iniciada en ${station.name}.` :
+        pathname === '/atencion/finalizar' && result.released ? 'Atención finalizada. El turno de Rayos X ya está disponible.' :
+        pathname === '/atencion/finalizar' ? 'Atención finalizada. Ya puedes llamar al siguiente.' :
+        result.cancelled ? 'Turno marcado como ausente. Su turno pendiente de Rayos X fue cancelado.' :
+        'Turno marcado como ausente.';
+        html(reply, await renderAttentionContent(store, service, station.id, { type: 'success', text }));
+        await broadcastState({ announce });
         return reply;
       } catch (error) {
-        return html(reply, renderAttentionContent(store, service, station?.id, { type: 'error', text: error.message }));
+        return html(reply, await renderAttentionContent(store, service, station?.id, { type: 'error', text: error.message }));
       }
     });
   }
 
-  server.post('/configuracion/puestos', (request, reply) => {
+  server.post('/configuracion/puestos', async (request, reply) => {
     try {
       const service = cleanService(request.body?.service);
-      const station = store.createStation(service, request.body?.name);
-      html(reply, renderStationsPanel(store, { type: 'success', text: `${station.name} fue agregado.` }));
+      const station = await store.createStation(service, request.body?.name);
+      html(reply, await renderStationsPanel(store, { type: 'success', text: `${station.name} fue agregado.` }));
       broadcastStations();
       return reply;
     } catch (error) {
-      return html(reply, renderStationsPanel(store, { type: 'error', text: error.message }));
+      return html(reply, await renderStationsPanel(store, { type: 'error', text: error.message }));
     }
   });
 
-  server.post('/configuracion/puestos/:id', (request, reply) => {
+  server.post('/configuracion/puestos/:id', async (request, reply) => {
     try {
-      const station = store.renameStation(Number(request.params.id), request.body?.name);
-      html(reply, renderStationsPanel(store, { type: 'success', text: `Puesto actualizado: ${station.name}.` }));
+      const station = await store.renameStation(Number(request.params.id), request.body?.name);
+      html(reply, await renderStationsPanel(store, { type: 'success', text: `Puesto actualizado: ${station.name}.` }));
       broadcastStations();
       return reply;
     } catch (error) {
-      return html(reply, renderStationsPanel(store, { type: 'error', text: error.message }));
+      return html(reply, await renderStationsPanel(store, { type: 'error', text: error.message }));
     }
   });
 
-  server.post('/configuracion/puestos/:id/estado', (request, reply) => {
+  server.post('/configuracion/puestos/:id/estado', async (request, reply) => {
     try {
-      const station = store.setStationActive(Number(request.params.id), request.body?.active === '1');
-      html(reply, renderStationsPanel(store, { type: 'success', text: `${station.name} quedó ${station.active ? 'activo' : 'inactivo'}.` }));
+      const station = await store.setStationActive(Number(request.params.id), request.body?.active === '1');
+      html(reply, await renderStationsPanel(store, { type: 'success', text: `${station.name} quedó ${station.active ? 'activo' : 'inactivo'}.` }));
       broadcastStations();
       return reply;
     } catch (error) {
-      return html(reply, renderStationsPanel(store, { type: 'error', text: error.message }));
+      return html(reply, await renderStationsPanel(store, { type: 'error', text: error.message }));
     }
   });
 
@@ -351,7 +375,7 @@ export function createApplication({
   });
   server.addHook('onClose', async () => {
     if (!storeClosed) {
-      store.close();
+      await store.close();
       storeClosed = true;
     }
   });
@@ -362,7 +386,7 @@ export function createApplication({
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const port = Number(process.env.PORT || 3000);
   const host = process.env.HOST || '127.0.0.1';
-  const application = createApplication({ logger: true });
+  const application = await createApplication({ logger: true });
   try {
     await application.server.listen({ port, host });
     console.log(`Lab. María Eugenia Tamayo Giraldo disponible en http://${host}:${port}`);

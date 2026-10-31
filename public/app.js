@@ -1,6 +1,8 @@
 (() => {
   'use strict';
 
+  let stationPickerOpen = true;
+
   const voiceStorageKey = 'lab-maria-eugenia:voice-uri';
   let lastAnnouncementId = sessionStorage.getItem('lab-maria-eugenia:last-announcement') || '';
   let spanishVoices = [];
@@ -189,9 +191,30 @@
     }
   });
 
+  document.addEventListener('toggle', (event) => {
+    if (event.target.matches('.station-picker')) stationPickerOpen = event.target.open;
+  }, true);
+
+  document.body.addEventListener('htmx:confirm', (event) => {
+    const choice = event.detail.elt.closest('[data-station-choice]');
+    if (!choice) return;
+    if (choice.getAttribute('aria-pressed') === 'true') {
+      event.preventDefault();
+      return;
+    }
+    if (document.querySelector('#attention-content .has-active')) {
+      event.preventDefault();
+      if (window.confirm('Hay un paciente activo en este puesto. Si cambias, su turno seguirá activo aquí. ¿Quieres cambiar de puesto?')) {
+        event.detail.issueRequest(true);
+      }
+    }
+  });
+
   document.body.addEventListener('htmx:afterSwap', (event) => {
     updateServiceChoices(event.target);
     if (event.target.id === 'attention-workspace') {
+      const picker = event.target.querySelector('.station-picker');
+      if (picker) picker.open = stationPickerOpen;
       const form = event.target.querySelector('.service-control');
       if (form) window.history.replaceState(null, '', `/atencion?${new URLSearchParams(new FormData(form))}`);
     }

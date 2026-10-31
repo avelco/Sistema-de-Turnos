@@ -51,10 +51,6 @@ function icon(name, className = 'icon') {
   return `<svg class="${className}" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${paths[name] || paths.info}</svg>`;
 }
 
-function initials(name) {
-  return name.split(/\s+/).slice(0, 2).map((part) => `${part[0]}.`).join(' ').toUpperCase();
-}
-
 function firstName(name) {
   return name.split(/\s+/)[0] || name;
 }
@@ -262,7 +258,7 @@ export function renderRecentArrivals(rows) {
       const status = row.status === 'waiting' && !row.available ? 'blocked' : row.status;
       return `<div class="recent-row" role="row">
       <strong role="cell">${escapeHtml(row.publicCode)}</strong>
-      <span role="cell" title="${escapeHtml(row.patientName)}">${initials(row.patientName)}</span>
+      <span role="cell" class="recent-patient-name">${escapeHtml(row.patientName)}</span>
       <span role="cell">${SERVICE_NAMES[row.service]}</span>
       <span role="cell"><span class="status-dot status-${status}"></span>${STATUS_LABELS[status]}</span>
       <time role="cell">${localTime(row.createdAt)}</time>
@@ -271,40 +267,40 @@ export function renderRecentArrivals(rows) {
   </div>`;
 }
 
-export function receptionPage(store, state = {}) {
+export async function receptionPage(store, state = {}) {
   const body = `<main id="contenido" class="page reception-page">
     <header class="page-title">
       <div><h1>Recepción</h1><p>Registra una llegada en menos de un minuto.</p></div>
     </header>
     <div class="reception-grid">
       ${renderRegistrationPanel(state)}
-      <aside id="queue-summary" class="queue-summary" sse-swap="queue-summary">${renderQueueSummary(store.queueSummary())}</aside>
+      <aside id="queue-summary" class="queue-summary" sse-swap="queue-summary">${renderQueueSummary(await store.queueSummary())}</aside>
       <section class="recent-section" aria-labelledby="recent-title">
         <div class="section-heading"><h2 id="recent-title">Últimos turnos</h2><p>Las llegadas más recientes del día</p></div>
-        <div id="recent-arrivals" sse-swap="recent-arrivals">${renderRecentArrivals(store.recentArrivals())}</div>
+        <div id="recent-arrivals" sse-swap="recent-arrivals">${renderRecentArrivals(await store.recentArrivals())}</div>
       </section>
     </div>
   </main>`;
   return layout({ title: 'Recepción', active: 'reception', body });
 }
 
-function selectedStation(store, service, stationId) {
-  const stations = store.listStations(service);
+async function selectedStation(store, service, stationId) {
+  const stations = await store.listStations(service);
   return stations.find((station) => station.id === Number(stationId)) || stations[0] || null;
 }
 
-export function renderAttentionContent(store, service = 'lab', stationId = null, message = null) {
-  const station = selectedStation(store, service, stationId);
+export async function renderAttentionContent(store, service = 'lab', stationId = null, message = null) {
+  const station = await selectedStation(store, service, stationId);
   if (!station) return `<div class="attention-alert error" role="alert">${icon('info')} No hay puestos activos para este servicio.</div>`;
-  const active = store.getActive(service, station.id);
-  const queue = store.waitingQueue(service);
-  const stats = store.serviceStats(service);
+  const active = await store.getActive(service, station.id);
+  const queue = await store.waitingQueue(service);
+  const stats = await store.serviceStats(service);
   const serviceName = SERVICE_NAMES[service];
-  const queueDescription = stats.waiting
-    ? `${stats.waiting} ${stats.waiting === 1 ? 'persona espera' : 'personas esperan'} en ${serviceName}.`
-    : stats.blocked
-      ? `${stats.blocked} ${stats.blocked === 1 ? 'persona continúa' : 'personas continúan'} en Toma de muestras y todavía no ${stats.blocked === 1 ? 'puede' : 'pueden'} ser ${stats.blocked === 1 ? 'llamada' : 'llamadas'}.`
-      : `La cola de ${serviceName} está al día.`;
+  const queueDescription = stats.waiting ?
+  `${stats.waiting} ${stats.waiting === 1 ? 'persona espera' : 'personas esperan'} en ${serviceName}.` :
+  stats.blocked ?
+  `${stats.blocked} ${stats.blocked === 1 ? 'persona continúa' : 'personas continúan'} en Toma de muestras y todavía no ${stats.blocked === 1 ? 'puede' : 'pueden'} ser ${stats.blocked === 1 ? 'llamada' : 'llamadas'}.` :
+  `La cola de ${serviceName} está al día.`;
   const alert = message ? `<div class="attention-alert ${message.type || ''}" role="status">${icon(message.type === 'error' ? 'info' : 'check')} ${escapeHtml(message.text)}</div>` : '';
 
   return `${alert}
@@ -344,33 +340,50 @@ function renderWaitingQueue(queue, blocked = 0) {
   if (!queue.length && blocked) return `<div class="queue-empty is-blocked">${serviceIcon('lab')}<div><strong>Sin pacientes disponibles</strong><span>${blocked === 1 ? 'La persona continúa' : `${blocked} personas continúan`} en Toma de muestras. Rayos X se habilitará al finalizar.</span></div></div>`;
   if (!queue.length) return `<div class="queue-empty">${icon('check')}<div><strong>No hay personas esperando</strong><span>Los nuevos turnos aparecerán aquí automáticamente.</span></div></div>`;
   return `<div class="waiting-table" role="table" aria-label="Próximos turnos">
-    <div class="waiting-row waiting-head" role="row"><span>Turno</span><span>Iniciales</span><span>Espera</span><span>Prioridad</span></div>
+    <div class="waiting-row waiting-head" role="row"><span>Turno</span><span>Paciente</span><span>Espera</span><span>Prioridad</span></div>
     ${queue.map((row) => `<div class="waiting-row" role="row">
-      <strong>${row.publicCode}</strong><span>${initials(row.patientName)}</span><span>${minutesWaiting(row.createdAt)} min</span>
+      <strong>${row.publicCode}</strong><span class="waiting-patient-name">${escapeHtml(row.patientName)}</span><span>${minutesWaiting(row.createdAt)} min</span>
       <span class="priority-label ${row.priority ? 'is-priority' : ''}"><i></i>${row.priority ? 'Prioritaria' : 'Regular'}</span>
     </div>`).join('')}
   </div>`;
 }
 
-export function renderAttentionWorkspace(store, service = 'lab', stationId = null, message = null) {
+export async function renderAttentionWorkspace(store, service = 'lab', stationId = null, message = null) {
   const safeService = service === 'xray' ? 'xray' : 'lab';
-  const stations = store.listStations(safeService);
+  const stations = await store.listStations(safeService);
   const station = stations.find((item) => item.id === Number(stationId)) || stations[0] || null;
   return `<section id="attention-workspace" hx-get="/atencion/puesto" hx-trigger="sse:stations-updated" hx-target="this" hx-swap="outerHTML" hx-include=".service-control">
     <header class="attention-header">
       <div class="page-title"><div><h1>Atención</h1><p>Llama y acompaña cada turno con claridad.</p></div></div>
-      <form class="service-control" hx-get="/atencion/puesto" hx-target="#attention-workspace" hx-swap="outerHTML" hx-trigger="change">
-        <label>Servicio<select name="service"><option value="lab" ${safeService === 'lab' ? 'selected' : ''}>Toma de muestras</option><option value="xray" ${safeService === 'xray' ? 'selected' : ''}>Rayos X</option></select></label>
-        <label>Puesto<select name="stationId">${stations.map((item) => `<option value="${item.id}" ${item.id === station?.id ? 'selected' : ''}>${escapeHtml(item.name)}</option>`).join('')}</select></label>
-      </form>
     </header>
-    <div id="attention-content" hx-get="/atencion/panel" hx-trigger="sse:queue-updated" hx-include=".service-control" hx-target="this" hx-swap="innerHTML">${renderAttentionContent(store, safeService, station?.id, message)}</div>
+    <details class="station-picker" open>
+      <summary>
+        <span class="station-current">${icon('users')}<span><small>Estás atendiendo en</small><strong>${escapeHtml(station?.name || 'Sin puesto disponible')}</strong><span>${SERVICE_NAMES[safeService]}</span></span></span>
+        <span class="station-picker-toggle"><span class="picker-closed-label">Cambiar puesto</span><span class="picker-open-label">Ocultar opciones</span>${icon('chevron')}</span>
+      </summary>
+      <form class="service-control">
+        <input type="hidden" name="service" value="${safeService}">
+        <input type="hidden" name="stationId" value="${station?.id || ''}">
+        <fieldset class="station-choice-group"><legend>Servicio</legend>
+          <div class="service-buttons">
+            ${['lab', 'xray'].map((item) => `<button type="button" class="station-choice service-button" data-station-choice aria-pressed="${item === safeService}" hx-get="/atencion/puesto" hx-vals='${JSON.stringify({ service: item, stationId: '' })}' hx-target="#attention-workspace" hx-swap="outerHTML" hx-sync="#attention-workspace:replace">${serviceIcon(item)}<span>${SERVICE_NAMES[item]}</span><span class="choice-check">${icon('check')}</span></button>`).join('')}
+          </div>
+        </fieldset>
+        <fieldset class="station-choice-group"><legend>Puesto <span>Elige con un toque</span></legend>
+          <div class="station-buttons">
+            ${stations.map((item) => `<button type="button" class="station-choice station-button" data-station-choice aria-pressed="${item.id === station?.id}" hx-get="/atencion/puesto" hx-vals='${JSON.stringify({ service: safeService, stationId: item.id })}' hx-target="#attention-workspace" hx-swap="outerHTML" hx-sync="#attention-workspace:replace"><span>${escapeHtml(item.name)}</span><span class="choice-check">${icon('check')}</span></button>`).join('')}
+          </div>
+        </fieldset>
+        <p class="station-remember">${icon('check')}Recordaremos este puesto en este navegador.</p>
+      </form>
+    </details>
+    <div id="attention-content" hx-get="/atencion/panel" hx-trigger="sse:queue-updated" hx-include=".service-control" hx-target="this" hx-swap="innerHTML">${await renderAttentionContent(store, safeService, station?.id, message)}</div>
   </section>`;
 }
 
-export function attentionPage(store, service = 'lab', stationId = null) {
+export async function attentionPage(store, service = 'lab', stationId = null) {
   const body = `<main id="contenido" class="page attention-page">
-    ${renderAttentionWorkspace(store, service, stationId)}
+    ${await renderAttentionWorkspace(store, service, stationId)}
   </main>`;
   return layout({ title: 'Atención', active: 'attention', body });
 }
@@ -389,9 +402,9 @@ function stationRow(station) {
   </div>`;
 }
 
-export function renderStationsPanel(store, message = null) {
-  const groups = ['lab', 'xray'].map((service) => {
-    const stations = store.listStations(service, { includeInactive: true });
+export async function renderStationsPanel(store, message = null) {
+  const groups = (await Promise.all(['lab', 'xray'].map(async (service) => {
+    const stations = await store.listStations(service, { includeInactive: true });
     const activeCount = stations.filter((station) => station.active).length;
     return `<section class="station-group">
       <header><div>${serviceIcon(service)}<span><h2>${SERVICE_NAMES[service]}</h2><p>${service === 'lab' ? 'Todos los módulos comparten una sola cola.' : 'Puestos disponibles para llamados de Rayos X.'}</p></span></div><strong>${activeCount} ${activeCount === 1 ? 'activo' : 'activos'}</strong></header>
@@ -402,16 +415,16 @@ export function renderStationsPanel(store, message = null) {
         <div><input id="new-station-${service}" name="name" maxlength="40" placeholder="Ej. ${service === 'lab' ? 'Módulo 3' : 'Sala 2'}" required><button class="button button-primary" type="submit">Agregar</button></div>
       </form>
     </section>`;
-  }).join('');
+  }))).join('');
   const alert = message ? `<div class="attention-alert ${message.type || ''}" role="status">${icon(message.type === 'error' ? 'info' : 'check')} ${escapeHtml(message.text)}</div>` : '';
   return `<div id="stations-panel">${alert}<div class="station-groups">${groups}</div></div>`;
 }
 
-export function configurationPage(store) {
+export async function configurationPage(store) {
   const body = `<main id="contenido" class="page settings-page">
     <header class="page-title"><div><h1>Configuración</h1><p>Administra los puestos que atienden cada cola.</p></div></header>
     <div class="settings-explanation">${icon('info')}<p><strong>Una cola, varios puestos.</strong> Módulo 1 y Módulo 2 pueden llamar pacientes distintos al mismo tiempo. Al agregar otro módulo, queda disponible inmediatamente en Atención.</p></div>
-    ${renderStationsPanel(store)}
+    ${await renderStationsPanel(store)}
   </main>`;
   return layout({ title: 'Configuración', active: 'settings', body });
 }
@@ -428,8 +441,8 @@ function spokenDestination(call) {
   return `${serviceName}, ${call.stationName}`;
 }
 
-export function renderDisplayContent(store) {
-  const calls = store.displayCalls();
+export async function renderDisplayContent(store) {
+  const calls = await store.displayCalls();
   const unique = [];
   const seen = new Set();
   for (const call of calls) {
@@ -460,8 +473,8 @@ export function renderDisplayContent(store) {
   </section>`;
 }
 
-export function displayPage(store) {
-  const body = `<main id="contenido" class="public-display"><div id="display-content" sse-swap="display-update">${renderDisplayContent(store)}</div><div id="announcement-trigger" hidden sse-swap="turn-announced"></div></main>`;
+export async function displayPage(store) {
+  const body = `<main id="contenido" class="public-display"><div id="display-content" sse-swap="display-update">${await renderDisplayContent(store)}</div><div id="announcement-trigger" hidden sse-swap="turn-announced"></div></main>`;
   return layout({ title: 'Pantalla de turnos', active: 'display', body, publicDisplay: true });
 }
 

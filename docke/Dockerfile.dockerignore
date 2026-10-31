@@ -1,0 +1,10 @@
+**
+!package.json
+!pnpm-lock.yaml
+!src
+!src/**
+!public
+!public/**
+!docke
+!docke/Dockerfile
+!docke/Dockerfile.dockerignore

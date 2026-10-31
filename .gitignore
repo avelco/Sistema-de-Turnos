@@ -6,3 +6,7 @@ node_modules/
 coverage/
 .DS_Store
 docs/qa/
+.env
+.env.*
+docke/.env.prod
+!docke/.env.prod.example
